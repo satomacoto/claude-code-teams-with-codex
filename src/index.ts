@@ -423,7 +423,6 @@ async function main() {
   const queue: QueueItem[] = [];
   let nextTaskId = 1;
   let isProcessing = false;
-  let wasIdle = true; // Start as idle; avoid duplicate idle_notification
 
   function genTaskId(): string {
     return `task-${nextTaskId++}`;
@@ -434,45 +433,43 @@ async function main() {
   async function maybeStartProcessing(): Promise<void> {
     if (isProcessing) return;
     isProcessing = true;
-    wasIdle = false;
 
-    while (queue.length > 0) {
-      const item = queue.shift()!;
-      const { taskId, msg } = item;
+    try {
+      while (queue.length > 0) {
+        const item = queue.shift()!;
+        const { taskId, msg } = item;
 
-      log(`← ${msg.from}: ${msg.text.slice(0, 120)}`);
-      process.stdout.write("\n");
-
-      inbox.sendTyped(cfg.name, {
-        type: "processing_notification",
-        taskId,
-      });
-
-      if (!codex.isAlive) {
-        log("Codex is not running, skipping task");
-        inbox.sendText(cfg.name, `Error: Codex App Server is not running (${taskId})`);
-        continue;
-      }
-
-      try {
-        const result = await codex.runTurn(threadId, msg.text, cfg.turnTimeout);
+        log(`← ${msg.from}: ${msg.text.slice(0, 120)}`);
         process.stdout.write("\n");
-        log(`→ sending result to team-lead (${taskId})`);
-        inbox.sendText(cfg.name, result);
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        log(`Error (${taskId}): ${message}`);
-        inbox.sendText(cfg.name, `Error: ${message}`);
+
+        inbox.sendTyped(cfg.name, {
+          type: "processing_notification",
+          taskId,
+        });
+
+        if (!codex.isAlive) {
+          log("Codex is not running, skipping task");
+          inbox.sendText(cfg.name, `Error: Codex App Server is not running (${taskId})`);
+          continue;
+        }
+
+        try {
+          const result = await codex.runTurn(threadId, msg.text, cfg.turnTimeout);
+          process.stdout.write("\n");
+          log(`→ sending result to team-lead (${taskId})`);
+          inbox.sendText(cfg.name, result);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          log(`Error (${taskId}): ${message}`);
+          inbox.sendText(cfg.name, `Error: ${message}`);
+        }
       }
+    } finally {
+      isProcessing = false;
     }
 
-    isProcessing = false;
-
-    // Emit idle_notification only on transition to idle
-    if (!wasIdle) {
-      wasIdle = true;
-      inbox.sendTyped(cfg.name, { type: "idle_notification", idleReason: "available" });
-    }
+    const idleReason = codex.isAlive ? "available" : "error";
+    inbox.sendTyped(cfg.name, { type: "idle_notification", idleReason });
   }
 
   // ── Intake (poll loop) ───────────────────────────────────────────────────
@@ -490,6 +487,10 @@ async function main() {
 
       if (parsed?.["type"] === "shutdown_request") {
         log(`Shutdown requested (reason: ${parsed["reason"] ?? "n/a"})`);
+        // Notify team-lead about any queued tasks that will be dropped
+        for (const item of queue) {
+          inbox.sendText(cfg.name, `Error: task ${item.taskId} interrupted by shutdown`);
+        }
         toAck.push(msg);
         inbox.ackMessages(toAck);
         inbox.sendTyped(cfg.name, {
@@ -507,6 +508,7 @@ async function main() {
       const totalInFlight = queue.length + (isProcessing ? 1 : 0);
       if (totalInFlight >= cfg.maxQueueSize) {
         log(`Queue full (${totalInFlight}/${cfg.maxQueueSize}), rejecting message`);
+        inbox.sendText(cfg.name, `Error: queue full (${totalInFlight}/${cfg.maxQueueSize}), task rejected`);
         inbox.sendTyped(cfg.name, {
           type: "queue_full_notification",
           totalInFlight,
@@ -535,7 +537,9 @@ async function main() {
     inbox.ackMessages(toAck);
 
     // Kick processor if not already running
-    void maybeStartProcessing();
+    maybeStartProcessing().catch((err) => {
+      log(`Processor error: ${err instanceof Error ? err.message : err}`);
+    });
   }
 
   // Start intake timer
