@@ -19,12 +19,15 @@ import { EventEmitter } from "node:events";
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
+const DEFAULT_MAX_QUEUE_SIZE = 25;
+
 interface Config {
   team: string;
   name: string;
   model?: string;
   cwd: string;
   turnTimeout: number;
+  maxQueueSize: number;
 }
 
 function parseArgs(): Config {
@@ -34,14 +37,16 @@ function parseArgs(): Config {
     name: "codex",
     cwd: process.cwd(),
     turnTimeout: 300_000,
+    maxQueueSize: DEFAULT_MAX_QUEUE_SIZE,
   };
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
-      case "--team":         cfg.team        = args[++i]; break;
-      case "--name":         cfg.name        = args[++i]; break;
-      case "--model":        cfg.model       = args[++i]; break;
-      case "--cwd":          cfg.cwd         = args[++i]; break;
-      case "--turn-timeout": cfg.turnTimeout = Number(args[++i]); break;
+      case "--team":           cfg.team         = args[++i]; break;
+      case "--name":           cfg.name         = args[++i]; break;
+      case "--model":          cfg.model        = args[++i]; break;
+      case "--cwd":            cfg.cwd          = args[++i]; break;
+      case "--turn-timeout":   cfg.turnTimeout  = Number(args[++i]); break;
+      case "--max-queue-size": cfg.maxQueueSize = Number(args[++i]); break;
     }
   }
   return cfg;
@@ -221,6 +226,9 @@ class InboxManager {
   private leadPath: string;
   private knownContent = "";
   private sessionStart: string;
+  // Track acked messages in memory to avoid writing back to the inbox file,
+  // which eliminates read-modify-write races with concurrent inbox writers.
+  private ackedTuples = new Map<string, number>();
 
   constructor(team: string, name: string) {
     const dir = path.join(os.homedir(), ".claude", "teams", team, "inboxes");
@@ -231,24 +239,39 @@ class InboxManager {
     if (!fs.existsSync(this.myPath)) fs.writeFileSync(this.myPath, "[]");
   }
 
+  private static tupleKey(m: InboxMsg): string {
+    return `${m.from}|${m.timestamp}|${m.text}`;
+  }
+
   pollNew(): InboxMsg[] {
     try {
       const raw = fs.readFileSync(this.myPath, "utf8");
       if (raw === this.knownContent) return [];
       this.knownContent = raw;
-      return (JSON.parse(raw) as InboxMsg[]).filter(
+      const all = (JSON.parse(raw) as InboxMsg[]).filter(
         (m) => !m.read && m.timestamp >= this.sessionStart
       );
+      // Filter out messages already acked in memory
+      const result: InboxMsg[] = [];
+      const tempCounts = new Map(this.ackedTuples);
+      for (const m of all) {
+        const key = InboxManager.tupleKey(m);
+        const remaining = tempCounts.get(key) ?? 0;
+        if (remaining > 0) {
+          tempCounts.set(key, remaining - 1);
+        } else {
+          result.push(m);
+        }
+      }
+      return result;
     } catch { return []; }
   }
 
-  markAllRead() {
-    try {
-      const msgs = JSON.parse(fs.readFileSync(this.myPath, "utf8")) as InboxMsg[];
-      const out = JSON.stringify(msgs.map((m) => ({ ...m, read: true })), null, 2);
-      fs.writeFileSync(this.myPath, out);
-      this.knownContent = out;
-    } catch { /* ignore */ }
+  ackMessages(msgs: InboxMsg[]) {
+    for (const m of msgs) {
+      const key = InboxManager.tupleKey(m);
+      this.ackedTuples.set(key, (this.ackedTuples.get(key) ?? 0) + 1);
+    }
   }
 
   sendText(from: string, text: string, summary?: string) {
@@ -340,13 +363,20 @@ function unregisterFromTeam(team: string, name: string) {
   } catch { /* ignore */ }
 }
 
+// ── Task queue ───────────────────────────────────────────────────────────────
+
+interface QueueItem {
+  taskId: string;
+  msg: InboxMsg;
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
   const cfg = parseArgs();
   const log = (msg: string) => console.log(`[${cfg.name}] ${msg}`);
 
-  log(`team=${cfg.team}  cwd=${cfg.cwd}`);
+  log(`team=${cfg.team}  cwd=${cfg.cwd}  maxQueue=${cfg.maxQueueSize}`);
   log(`inbox: ~/.claude/teams/${cfg.team}/inboxes/${cfg.name}.json`);
 
   const inbox = new InboxManager(cfg.team, cfg.name);
@@ -388,21 +418,80 @@ async function main() {
   process.on("SIGINT",  gracefulExit);
   process.on("SIGTERM", gracefulExit);
 
-  // Poll loop
-  while (true) {
-    const msgs = inbox.pollNew();
+  // ── Queue state ──────────────────────────────────────────────────────────
 
-    if (msgs.length > 0) {
-      inbox.markAllRead();
+  const queue: QueueItem[] = [];
+  let nextTaskId = 1;
+  let isProcessing = false;
+  let wasIdle = true; // Start as idle; avoid duplicate idle_notification
+
+  function genTaskId(): string {
+    return `task-${nextTaskId++}`;
+  }
+
+  // ── Processor ────────────────────────────────────────────────────────────
+
+  async function maybeStartProcessing(): Promise<void> {
+    if (isProcessing) return;
+    isProcessing = true;
+    wasIdle = false;
+
+    while (queue.length > 0) {
+      const item = queue.shift()!;
+      const { taskId, msg } = item;
+
+      log(`← ${msg.from}: ${msg.text.slice(0, 120)}`);
+      process.stdout.write("\n");
+
+      inbox.sendTyped(cfg.name, {
+        type: "processing_notification",
+        taskId,
+      });
+
+      if (!codex.isAlive) {
+        log("Codex is not running, skipping task");
+        inbox.sendText(cfg.name, `Error: Codex App Server is not running (${taskId})`);
+        continue;
+      }
+
+      try {
+        const result = await codex.runTurn(threadId, msg.text, cfg.turnTimeout);
+        process.stdout.write("\n");
+        log(`→ sending result to team-lead (${taskId})`);
+        inbox.sendText(cfg.name, result);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        log(`Error (${taskId}): ${message}`);
+        inbox.sendText(cfg.name, `Error: ${message}`);
+      }
     }
 
+    isProcessing = false;
+
+    // Emit idle_notification only on transition to idle
+    if (!wasIdle) {
+      wasIdle = true;
+      inbox.sendTyped(cfg.name, { type: "idle_notification", idleReason: "available" });
+    }
+  }
+
+  // ── Intake (poll loop) ───────────────────────────────────────────────────
+
+  function pollAndEnqueue(): void {
+    const msgs = inbox.pollNew();
+    if (msgs.length === 0) return;
+
+    const toAck: InboxMsg[] = [];
+
     for (const msg of msgs) {
+      // Check for shutdown_request — handle out-of-band, bypass queue
       let parsed: Record<string, unknown> | null = null;
       try { parsed = JSON.parse(msg.text) as Record<string, unknown>; } catch { /* plain text */ }
 
-      // shutdown_request
       if (parsed?.["type"] === "shutdown_request") {
         log(`Shutdown requested (reason: ${parsed["reason"] ?? "n/a"})`);
+        toAck.push(msg);
+        inbox.ackMessages(toAck);
         inbox.sendTyped(cfg.name, {
           type: "shutdown_approved",
           requestId: parsed["requestId"],
@@ -414,33 +503,44 @@ async function main() {
         process.exit(0);
       }
 
-      // regular task
-      log(`← ${msg.from}: ${msg.text.slice(0, 120)}`);
-      process.stdout.write("\n");
-
-      if (!codex.isAlive) {
-        log("Codex is not running, skipping task");
-        inbox.sendText(cfg.name, "Error: Codex App Server is not running");
-        inbox.sendTyped(cfg.name, { type: "idle_notification", idleReason: "error" });
+      // Check queue capacity (count active task + queued items)
+      const totalInFlight = queue.length + (isProcessing ? 1 : 0);
+      if (totalInFlight >= cfg.maxQueueSize) {
+        log(`Queue full (${totalInFlight}/${cfg.maxQueueSize}), rejecting message`);
+        inbox.sendTyped(cfg.name, {
+          type: "queue_full_notification",
+          totalInFlight,
+          maxQueueSize: cfg.maxQueueSize,
+        });
+        toAck.push(msg);
         continue;
       }
 
-      try {
-        const result = await codex.runTurn(threadId, msg.text, cfg.turnTimeout);
-        process.stdout.write("\n");
-        log(`→ sending result to team-lead`);
-        inbox.sendText(cfg.name, result);
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        log(`Error: ${message}`);
-        inbox.sendText(cfg.name, `Error: ${message}`);
-      }
+      // Enqueue task
+      const taskId = genTaskId();
+      queue.push({ taskId, msg });
+      toAck.push(msg);
 
-      inbox.sendTyped(cfg.name, { type: "idle_notification", idleReason: "available" });
+      inbox.sendTyped(cfg.name, {
+        type: "queued_notification",
+        taskId,
+        queuePosition: queue.length, // 1-based
+        queueLength: queue.length,
+        summary: msg.text.slice(0, 80),
+      });
+
+      log(`Queued ${taskId} (position ${queue.length}/${cfg.maxQueueSize})`);
     }
 
-    await new Promise<void>((r) => setTimeout(r, 300));
+    inbox.ackMessages(toAck);
+
+    // Kick processor if not already running
+    void maybeStartProcessing();
   }
+
+  // Start intake timer
+  setInterval(pollAndEnqueue, 300);
+  log("Intake loop started (300ms interval)");
 }
 
 main().catch((err) => { console.error(err); process.exit(1); });
