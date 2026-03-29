@@ -423,6 +423,7 @@ async function main() {
   const queue: QueueItem[] = [];
   let nextTaskId = 1;
   let isProcessing = false;
+  let currentTaskId: string | null = null;
 
   function genTaskId(): string {
     return `task-${nextTaskId++}`;
@@ -438,6 +439,7 @@ async function main() {
       while (queue.length > 0) {
         const item = queue.shift()!;
         const { taskId, msg } = item;
+        currentTaskId = taskId;
 
         log(`← ${msg.from}: ${msg.text.slice(0, 120)}`);
         process.stdout.write("\n");
@@ -465,11 +467,11 @@ async function main() {
         }
       }
     } finally {
+      currentTaskId = null;
       isProcessing = false;
+      const idleReason = codex.isAlive ? "available" : "error";
+      inbox.sendTyped(cfg.name, { type: "idle_notification", idleReason });
     }
-
-    const idleReason = codex.isAlive ? "available" : "error";
-    inbox.sendTyped(cfg.name, { type: "idle_notification", idleReason });
   }
 
   // ── Intake (poll loop) ───────────────────────────────────────────────────
@@ -487,12 +489,14 @@ async function main() {
 
       if (parsed?.["type"] === "shutdown_request") {
         log(`Shutdown requested (reason: ${parsed["reason"] ?? "n/a"})`);
-        // Notify team-lead about any queued tasks that will be dropped
+        // Notify team-lead about the currently processing task and any queued tasks
+        if (currentTaskId) {
+          inbox.sendText(cfg.name, `Error: task ${currentTaskId} interrupted by shutdown`);
+        }
         for (const item of queue) {
           inbox.sendText(cfg.name, `Error: task ${item.taskId} interrupted by shutdown`);
         }
         toAck.push(msg);
-        inbox.ackMessages(toAck);
         inbox.sendTyped(cfg.name, {
           type: "shutdown_approved",
           requestId: parsed["requestId"],
