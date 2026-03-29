@@ -68,17 +68,37 @@ npm install
 
 ## Usage
 
-### As a Claude Code teammate
+There are two ways to use the bridge: with a Claude Code skill (recommended) or manually.
 
-Use the `/codex-teammate` skill in Claude Code to start the bridge in a `tmux` pane and register it as a team member automatically.
+### Option A: With the `/codex-teammate` skill
 
-### Manual startup
+Install the skill first (see [Skill Installation](#skill-installation) below), then run in Claude Code:
 
-From the repository root:
-
-```bash
-npx --prefix bridge tsx bridge/src/index.ts --team <team-name> --name <teammate-name> --cwd "$(pwd)"
 ```
+/codex-teammate
+```
+
+This automatically creates a team, starts the bridge in a `tmux` pane, and registers it as a teammate. You can then use `SendMessage` to assign tasks.
+
+### Option B: Manual startup
+
+1. **Create a team** in Claude Code using `TeamCreate`.
+
+2. **Start the bridge** in a separate terminal (or tmux pane):
+
+   ```bash
+   npx --prefix bridge tsx bridge/src/index.ts --team <team-name> --name <teammate-name> --cwd "$(pwd)"
+   ```
+
+   The bridge automatically registers itself in the team config, so Claude Code can communicate with it via `SendMessage`.
+
+3. **Assign tasks** in Claude Code using `SendMessage`:
+
+   ```
+   SendMessage(to: "<teammate-name>", message: "Review this code for bugs")
+   ```
+
+4. **Shut down** the bridge by sending a `shutdown_request` via `SendMessage`, or press `Ctrl+C` in the terminal.
 
 ### Debugging inbox activity
 
@@ -86,17 +106,11 @@ npx --prefix bridge tsx bridge/src/index.ts --team <team-name> --name <teammate-
 npx --prefix bridge tsx bridge/src/watch-inboxes.ts
 ```
 
-## Claude Code Skills
+## Skill Installation
 
-Claude Code skills can be installed by placing a `SKILL.md` file under:
+Claude Code skills are installed by placing a `SKILL.md` file under `~/.claude/skills/<skill-name>/SKILL.md`. This step is optional but recommended for convenience.
 
-```text
-~/.claude/skills/<skill-name>/SKILL.md
-```
-
-Example for `/codex-teammate`:
-
-Path: `~/.claude/skills/codex-teammate/SKILL.md`
+Create `~/.claude/skills/codex-teammate/SKILL.md` with the following content:
 
 ````markdown
 ---
