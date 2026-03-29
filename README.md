@@ -9,7 +9,7 @@ This project is a lightweight integration sandbox for connecting Codex CLI and C
 The repository currently includes:
 
 - `bridge/` - A TypeScript Codex App Server bridge that communicates with Codex over JSON-RPC and integrates with Claude Code's inbox-based team messaging
-- `watch-inboxes.py` - Optional debugging utility for monitoring team inbox activity
+- `bridge/src/watch-inboxes.ts` - Optional debugging utility for monitoring team inbox activity
 
 ## Requirements
 
@@ -42,7 +42,7 @@ npx --prefix bridge tsx bridge/src/index.ts --team <team-name> --name <teammate-
 ### Debugging inbox activity
 
 ```bash
-python3 watch-inboxes.py
+npx --prefix bridge tsx bridge/src/watch-inboxes.ts
 ```
 
 ## Claude Code Skills
@@ -106,11 +106,11 @@ Add a Codex CLI teammate via the App Server bridge.
 ├── .gitignore
 ├── bridge/
 │   ├── src/
-│   │   └── index.ts
+│   │   ├── index.ts
+│   │   └── watch-inboxes.ts
 │   ├── package.json
 │   ├── package-lock.json
 │   └── tsconfig.json
-├── watch-inboxes.py
 └── README.md
 ```
 
