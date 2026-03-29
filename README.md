@@ -8,8 +8,8 @@ This project is a lightweight integration sandbox for connecting Codex CLI and C
 
 The repository currently includes:
 
-- `bridge/` - A TypeScript Codex App Server bridge that communicates with Codex over JSON-RPC and integrates with Claude Code's inbox-based team messaging
-- `bridge/src/watch-inboxes.ts` - Optional debugging utility for monitoring team inbox activity
+- `src/index.ts` - A TypeScript Codex App Server bridge that communicates with Codex over JSON-RPC and integrates with Claude Code's inbox-based team messaging
+- `src/watch-inboxes.ts` - Optional debugging utility for monitoring team inbox activity
 
 ## How It Works
 
@@ -76,7 +76,6 @@ Agent Teams is an [experimental feature](https://docs.anthropic.com/en/docs/clau
 ```bash
 git clone https://github.com/satomacoto/claude-code-teams-with-codex.git
 cd claude-code-teams-with-codex
-cd bridge
 npm install
 ```
 
@@ -101,7 +100,7 @@ This automatically creates a team, starts the bridge in a `tmux` pane, and regis
 2. **Start the bridge** in a separate terminal (or tmux pane):
 
    ```bash
-   npx --prefix bridge tsx bridge/src/index.ts --team <team-name> --name <teammate-name> --cwd "$(pwd)"
+   npx tsx src/index.ts --team <team-name> --name <teammate-name> --cwd "$(pwd)"
    ```
 
    The bridge automatically registers itself in the team config, so Claude Code can communicate with it via `SendMessage`.
@@ -117,7 +116,7 @@ This automatically creates a team, starts the bridge in a `tmux` pane, and regis
 ### Debugging inbox activity
 
 ```bash
-npx --prefix bridge tsx bridge/src/watch-inboxes.ts
+npx tsx src/watch-inboxes.ts
 ```
 
 ## Skill Installation
@@ -147,7 +146,7 @@ Add a Codex CLI teammate via the App Server bridge.
 
 2. **Start the bridge** using Bash. Pass the team name:
    ```bash
-   CODEX_PANE=$(tmux split-window -h -P -F '#{pane_id}' "npx --prefix <path-to-repo>/bridge tsx <path-to-repo>/bridge/src/index.ts --team {team-name} --name {teammate-name} --cwd $(pwd); echo '[Bridge exited]'; read")
+   CODEX_PANE=$(tmux split-window -h -P -F '#{pane_id}' "npx --prefix <path-to-repo> tsx <path-to-repo>/src/index.ts --team {team-name} --name {teammate-name} --cwd $(pwd); echo '[Bridge exited]'; read")
    echo "$CODEX_PANE"
    ```
 
@@ -173,13 +172,12 @@ Add a Codex CLI teammate via the App Server bridge.
 ├── .claude/
 │   └── settings.local.json
 ├── .gitignore
-├── bridge/
-│   ├── src/
-│   │   ├── index.ts
-│   │   └── watch-inboxes.ts
-│   ├── package.json
-│   ├── package-lock.json
-│   └── tsconfig.json
+├── src/
+│   ├── index.ts
+│   └── watch-inboxes.ts
+├── package.json
+├── package-lock.json
+├── tsconfig.json
 └── README.md
 ```
 
