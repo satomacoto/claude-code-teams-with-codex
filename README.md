@@ -52,12 +52,26 @@ The integration is built around a small bridge process that connects Claude Code
 
 ## Requirements
 
-- [Claude Code](https://claude.ai/code) (CLI)
+- [Claude Code](https://claude.ai/code) (CLI) with Agent Teams enabled (see below)
 - [Codex CLI](https://github.com/openai/codex)
 - Node.js and `npx`
 - `tmux`
 
 ## Setup
+
+### 1. Enable Agent Teams in Claude Code
+
+Agent Teams is an [experimental feature](https://docs.anthropic.com/en/docs/claude-code/agent-teams) that is disabled by default. Add the following to your Claude Code settings (`~/.claude/settings.json`):
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  }
+}
+```
+
+### 2. Clone and install dependencies
 
 ```bash
 git clone https://github.com/satomacoto/codex-claude-code.git
