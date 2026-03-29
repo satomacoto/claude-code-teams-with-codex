@@ -11,6 +11,45 @@ The repository currently includes:
 - `bridge/` - A TypeScript Codex App Server bridge that communicates with Codex over JSON-RPC and integrates with Claude Code's inbox-based team messaging
 - `bridge/src/watch-inboxes.ts` - Optional debugging utility for monitoring team inbox activity
 
+## How It Works
+
+The integration is built around a small bridge process that connects Claude Code team messaging with a Codex App Server session.
+
+1. Claude Code creates a team with `TeamCreate` and starts the bridge in a `tmux` pane.
+2. The bridge launches the Codex App Server as a child process and communicates with it over JSON-RPC.
+3. Team communication uses a file-based inbox protocol at `~/.claude/teams/{team}/inboxes/{name}.json`.
+4. The bridge polls its own inbox every 300 ms and detects new messages.
+5. When a message arrives, the bridge forwards it to the Codex App Server and streams the result.
+6. When the task completes, the bridge writes the result back to the team lead's inbox.
+7. Shutdown is handled gracefully through the `shutdown_request` / `shutdown_response` protocol.
+
+```text
++------------------+        writes message         +-------------------------------+
+|   Claude Code    | ---------------------------> | inbox JSON file               |
+|  (team lead)     |                              | ~/.claude/teams/{team}/...    |
++------------------+                              +-------------------------------+
+                                                           |
+                                                           | polled by bridge
+                                                           v
+                                                  +------------------+
+                                                  |      bridge      |
+                                                  |   (tmux pane)    |
+                                                  +------------------+
+                                                           |
+                                                           | JSON-RPC
+                                                           v
+                                                  +------------------+
+                                                  | Codex App Server |
+                                                  +------------------+
+                                                           |
+                                                           | result
+                                                           v
++------------------+        reads result           +-------------------------------+
+|   Claude Code    | <--------------------------- | inbox JSON file               |
+|  (team lead)     |                              | ~/.claude/teams/{team}/...    |
++------------------+                              +-------------------------------+
+```
+
 ## Requirements
 
 - Node.js and `npx`
