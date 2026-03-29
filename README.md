@@ -169,8 +169,6 @@ Add a Codex CLI teammate via the App Server bridge.
 
 ```text
 .
-├── .claude/
-│   └── settings.local.json
 ├── .gitignore
 ├── src/
 │   ├── index.ts
