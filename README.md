@@ -52,6 +52,8 @@ The integration is built around a small bridge process that connects Claude Code
 
 ## Requirements
 
+- [Claude Code](https://claude.ai/code) (CLI)
+- [Codex CLI](https://github.com/openai/codex)
 - Node.js and `npx`
 - `tmux`
 
