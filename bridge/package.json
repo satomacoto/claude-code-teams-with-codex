@@ -1,7 +1,7 @@
 {
-  "name": "codex-bridge",
+  "name": "claude-code-teams-with-codex",
   "version": "0.1.0",
-  "description": "Codex CLI App Server bridge for Claude Code Agent Teams",
+  "description": "A bridge that uses Claude Code Agent Teams to collaborate with Codex CLI",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",

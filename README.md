@@ -1,6 +1,6 @@
-# codex-claude-code
+# claude-code-teams-with-codex
 
-An experimental repository for exploring multi-agent workflows between Codex CLI and Claude Code.
+A bridge that uses Claude Code Agent Teams to collaborate with Codex CLI.
 
 ## Overview
 
@@ -74,8 +74,8 @@ Agent Teams is an [experimental feature](https://docs.anthropic.com/en/docs/clau
 ### 2. Clone and install dependencies
 
 ```bash
-git clone https://github.com/satomacoto/codex-claude-code.git
-cd codex-claude-code
+git clone https://github.com/satomacoto/claude-code-teams-with-codex.git
+cd claude-code-teams-with-codex
 cd bridge
 npm install
 ```
