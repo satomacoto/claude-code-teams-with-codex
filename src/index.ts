@@ -545,8 +545,8 @@ async function main() {
     const server = codex;
     const currentTransport = server.transport;
     server.on("exit", (code) => {
-      isTurnRunning = false;
       if (intentionallyStoppedServers.has(server)) return;
+      isTurnRunning = false;
       if (currentTransport === "broker") {
         log(`Broker disconnected (code=${code}). Falling back to direct spawn in 2s...`);
         brokerFailed = true;
