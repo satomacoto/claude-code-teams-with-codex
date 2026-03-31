@@ -12,9 +12,11 @@
 
 import { spawn, ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import * as os from "node:os";
+import * as crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -28,6 +30,7 @@ interface Config {
   cwd: string;
   turnTimeout: number;
   maxQueueSize: number;
+  brokerEndpoint?: string;
 }
 
 function parseArgs(): Config {
@@ -41,81 +44,105 @@ function parseArgs(): Config {
   };
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
-      case "--team":           cfg.team         = args[++i]; break;
-      case "--name":           cfg.name         = args[++i]; break;
-      case "--model":          cfg.model        = args[++i]; break;
-      case "--cwd":            cfg.cwd          = args[++i]; break;
-      case "--turn-timeout":   cfg.turnTimeout  = Number(args[++i]); break;
-      case "--max-queue-size": cfg.maxQueueSize = Number(args[++i]); break;
+      case "--team":             cfg.team            = args[++i]; break;
+      case "--name":             cfg.name            = args[++i]; break;
+      case "--model":            cfg.model           = args[++i]; break;
+      case "--cwd":              cfg.cwd             = args[++i]; break;
+      case "--turn-timeout":     cfg.turnTimeout     = Number(args[++i]); break;
+      case "--max-queue-size":   cfg.maxQueueSize    = Number(args[++i]); break;
+      case "--broker-endpoint":  cfg.brokerEndpoint  = args[++i]; break;
     }
   }
   return cfg;
 }
 
+// ── Broker discovery ────────────────────────────────────────────────────────
+
+function resolveStateDir(cwd: string): string {
+  const pluginDataDir = process.env["CLAUDE_PLUGIN_DATA"];
+  let canonicalCwd = cwd;
+  try { canonicalCwd = fs.realpathSync(cwd); } catch { /* use original */ }
+  const slug = (path.basename(canonicalCwd) || "workspace").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
+  const hash = crypto.createHash("sha256").update(canonicalCwd).digest("hex").slice(0, 16);
+  const stateRoot = pluginDataDir ? path.join(pluginDataDir, "state") : path.join(os.tmpdir(), "codex-companion");
+  return path.join(stateRoot, `${slug}-${hash}`);
+}
+
+function discoverBrokerEndpoint(cwd: string): string | null {
+  const stateDir = resolveStateDir(cwd);
+  const brokerFile = path.join(stateDir, "broker.json");
+  if (!fs.existsSync(brokerFile)) return null;
+  try {
+    const session = JSON.parse(fs.readFileSync(brokerFile, "utf8")) as Record<string, unknown>;
+    return (session["endpoint"] as string) ?? null;
+  } catch { return null; }
+}
+
+function parseBrokerEndpoint(endpoint: string): string {
+  if (endpoint.startsWith("unix:")) return endpoint.slice(5);
+  if (endpoint.startsWith("pipe:")) return endpoint.slice(5);
+  return endpoint;
+}
+
 // ── Codex App Server client ──────────────────────────────────────────────────
 
-class CodexServer extends EventEmitter {
-  private proc: ChildProcess;
-  private rl: readline.Interface;
-  private nextId = 0;
-  private pending = new Map<number, { resolve: (v: Record<string, unknown>) => void; reject: (e: Error) => void }>();
-  private alive = true;
-
-  constructor(cwd: string) {
-    super();
-    this.proc = spawn("codex", ["app-server"], {
-      stdio: ["pipe", "pipe", "inherit"],
-      cwd,
-    });
-    this.rl = readline.createInterface({ input: this.proc.stdout! });
-    this.rl.on("line", (line) => {
-      if (!line.trim()) return;
-      try {
-        const msg = JSON.parse(line) as Record<string, unknown>;
-        const id = msg["id"];
-        if (typeof id === "number" && this.pending.has(id)) {
-          const { resolve, reject } = this.pending.get(id)!;
-          this.pending.delete(id);
-          if (msg["error"]) {
-            const err = msg["error"] as Record<string, unknown>;
-            reject(new Error(`Codex RPC error ${err["code"]}: ${err["message"]}`));
-          } else {
-            resolve(msg);
-          }
-        } else if (typeof msg["method"] === "string") {
-          this.emit("notification", msg);
-        }
-      } catch { /* ignore parse errors */ }
-    });
-    this.proc.on("exit", (code) => {
-      this.alive = false;
-      // Reject all pending requests
-      for (const [, { reject }] of this.pending) {
-        reject(new Error(`Codex App Server exited with code ${code}`));
-      }
-      this.pending.clear();
-      this.emit("exit", code);
-    });
-  }
+abstract class CodexServer extends EventEmitter {
+  protected nextId = 0;
+  protected pending = new Map<number, { resolve: (v: Record<string, unknown>) => void; reject: (e: Error) => void }>();
+  protected alive = true;
+  public transport: "direct" | "broker" = "direct";
 
   get isAlive() { return this.alive; }
+
+  protected handleLine(line: string) {
+    if (!line.trim()) return;
+    try {
+      const msg = JSON.parse(line) as Record<string, unknown>;
+      const id = msg["id"];
+      if (typeof id === "number" && this.pending.has(id)) {
+        const { resolve, reject } = this.pending.get(id)!;
+        this.pending.delete(id);
+        if (msg["error"]) {
+          const err = msg["error"] as Record<string, unknown>;
+          reject(new Error(`Codex RPC error ${err["code"]}: ${err["message"]}`));
+        } else {
+          resolve(msg);
+        }
+      } else if (typeof msg["method"] === "string") {
+        this.emit("notification", msg);
+      }
+    } catch { /* ignore parse errors */ }
+  }
+
+  protected handleExit(code: number | null) {
+    if (!this.alive) return;
+    this.alive = false;
+    for (const [, { reject }] of this.pending) {
+      reject(new Error(`Codex App Server exited with code ${code}`));
+    }
+    this.pending.clear();
+    this.emit("exit", code);
+  }
 
   request(method: string, params?: unknown): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       if (!this.alive) return reject(new Error("Codex App Server is not running"));
       const id = this.nextId++;
-      this.proc.stdin!.write(JSON.stringify({ method, params, id }) + "\n");
+      this.sendMessage({ method, params, id });
       this.pending.set(id, { resolve, reject });
     });
   }
 
   notify(method: string, params?: unknown) {
     if (!this.alive) return;
-    this.proc.stdin!.write(JSON.stringify({ method, params }) + "\n");
+    this.sendMessage({ method, params });
   }
 
+  protected abstract sendMessage(msg: Record<string, unknown>): void;
+  abstract kill(): void;
+
   async setup(cwd: string, model?: string): Promise<string> {
-    const initRes = await this.request("initialize", {
+    await this.request("initialize", {
       clientInfo: { name: "codex-bridge", version: "0.1.0" },
     });
     this.notify("initialized");
@@ -232,8 +259,81 @@ class CodexServer extends EventEmitter {
   interrupt(threadId: string) {
     return this.request("turn/interrupt", { threadId });
   }
+}
+
+// ── Direct (stdin/stdout) client ────────────────────────────────────────────
+
+class SpawnedCodexServer extends CodexServer {
+  private proc: ChildProcess;
+  private rl: readline.Interface;
+
+  constructor(cwd: string) {
+    super();
+    this.transport = "direct";
+    this.proc = spawn("codex", ["app-server"], {
+      stdio: ["pipe", "pipe", "inherit"],
+      cwd,
+    });
+    this.rl = readline.createInterface({ input: this.proc.stdout! });
+    this.rl.on("line", (line) => this.handleLine(line));
+    this.proc.on("exit", (code) => this.handleExit(code));
+  }
+
+  protected sendMessage(msg: Record<string, unknown>) {
+    this.proc.stdin!.write(JSON.stringify(msg) + "\n");
+  }
 
   kill() { this.proc.kill(); }
+}
+
+// ── Broker (Unix socket) client ─────────────────────────────────────────────
+
+class BrokerCodexServer extends CodexServer {
+  private socket: net.Socket;
+  private lineBuffer = "";
+
+  constructor(socketPath: string) {
+    super();
+    this.transport = "broker";
+    this.socket = net.createConnection({ path: socketPath });
+    this.socket.setEncoding("utf8");
+    this.socket.on("data", (chunk: string) => {
+      this.lineBuffer += chunk;
+      let idx = this.lineBuffer.indexOf("\n");
+      while (idx !== -1) {
+        const line = this.lineBuffer.slice(0, idx);
+        this.lineBuffer = this.lineBuffer.slice(idx + 1);
+        this.handleLine(line);
+        idx = this.lineBuffer.indexOf("\n");
+      }
+    });
+    this.socket.on("close", () => this.handleExit(null));
+    this.socket.on("error", (err) => {
+      console.error(`[broker] Socket error: ${err instanceof Error ? err.message : err}`);
+      this.handleExit(null);
+    });
+  }
+
+  protected sendMessage(msg: Record<string, unknown>) {
+    if (this.socket.destroyed) return;
+    this.socket.write(JSON.stringify(msg) + "\n");
+  }
+
+  kill() { this.socket.end(); }
+}
+
+// ── Factory ─────────────────────────────────────────────────────────────────
+
+function createCodexServer(cfg: Config): CodexServer {
+  const endpoint = cfg.brokerEndpoint
+    ?? process.env["CODEX_COMPANION_APP_SERVER_ENDPOINT"]
+    ?? discoverBrokerEndpoint(cfg.cwd);
+
+  if (endpoint) {
+    const socketPath = parseBrokerEndpoint(endpoint);
+    return new BrokerCodexServer(socketPath);
+  }
+  return new SpawnedCodexServer(cfg.cwd);
 }
 
 // ── Inbox manager ────────────────────────────────────────────────────────────
@@ -401,6 +501,14 @@ interface QueueItem {
 async function main() {
   const cfg = parseArgs();
   const log = (msg: string) => console.log(`[${cfg.name}] ${msg}`);
+  const isBrokerBusyError = (err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    return message.includes("Codex RPC error -32001:");
+  };
+  const isBrokerDisconnectError = (err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    return message.startsWith("Codex App Server exited with code");
+  };
 
   log(`team=${cfg.team}  cwd=${cfg.cwd}  maxQueue=${cfg.maxQueueSize}`);
   log(`inbox: ~/.claude/teams/${cfg.team}/inboxes/${cfg.name}.json`);
@@ -415,27 +523,83 @@ async function main() {
   let codex: CodexServer;
   let threadId: string;
 
+  let brokerFailed = false;
+  let restartTimer: ReturnType<typeof setTimeout> | null = null;
+  const intentionallyStoppedServers = new WeakSet<CodexServer>();
+
+  const clearRestartTimer = () => {
+    if (restartTimer) {
+      clearTimeout(restartTimer);
+      restartTimer = null;
+    }
+  };
+
   const startCodex = async (): Promise<void> => {
     log("Starting Codex App Server...");
-    codex = new CodexServer(cfg.cwd);
-    codex.on("exit", (code) => {
+    if (brokerFailed) {
+      // Force direct spawn after broker failure
+      codex = new SpawnedCodexServer(cfg.cwd);
+    } else {
+      codex = createCodexServer(cfg);
+    }
+    const server = codex;
+    const currentTransport = server.transport;
+    server.on("exit", (code) => {
       isTurnRunning = false;
-      log(`Codex App Server exited (code=${code}). Restarting in 2s...`);
-      setTimeout(async () => {
+      if (intentionallyStoppedServers.has(server)) return;
+      if (currentTransport === "broker") {
+        log(`Broker disconnected (code=${code}). Falling back to direct spawn in 2s...`);
+        brokerFailed = true;
+      } else {
+        log(`Codex App Server exited (code=${code}). Restarting in 2s...`);
+      }
+      clearRestartTimer();
+      restartTimer = setTimeout(async () => {
+        restartTimer = null;
         try {
           await startCodex();
-          log(`Reconnected. thread: ${threadId}`);
+          log(`Reconnected. thread: ${threadId}  transport: ${codex.transport}`);
         } catch (err) {
           log(`Failed to restart: ${err instanceof Error ? err.message : err}`);
           process.exit(1);
         }
       }, 2000);
     });
-    threadId = await codex.setup(cfg.cwd, cfg.model);
-    log(`thread: ${threadId}  ✓ ready\n`);
+    threadId = await server.setup(cfg.cwd, cfg.model);
+    log(`thread: ${threadId}  transport: ${server.transport}  ✓ ready\n`);
   };
 
-  await startCodex();
+  const fallbackToDirectSpawn = async (reason: string) => {
+    log(`${reason}. Falling back to direct spawn...`);
+    brokerFailed = true;
+    clearRestartTimer();
+    intentionallyStoppedServers.add(codex);
+    codex.kill();
+    await startCodex();
+  };
+
+  const withBrokerBusyFallback = async <T>(action: () => Promise<T>): Promise<T> => {
+    try {
+      return await action();
+    } catch (err) {
+      if (codex.transport !== "broker" || (!isBrokerBusyError(err) && !isBrokerDisconnectError(err))) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      await fallbackToDirectSpawn(`Broker unavailable at runtime (${message})`);
+      return action();
+    }
+  };
+
+  try {
+    await startCodex();
+  } catch (err) {
+    if (codex!.transport === "broker") {
+      clearRestartTimer();
+      const message = err instanceof Error ? err.message : String(err);
+      await fallbackToDirectSpawn(`Broker setup failed: ${message}`);
+    } else {
+      throw err;
+    }
+  }
 
   const gracefulExit = () => {
     unregisterFromTeam(cfg.team, cfg.name);
@@ -485,7 +649,7 @@ async function main() {
 
         try {
           isTurnRunning = true;
-          const result = await codex.runTurn(threadId, msg.text, cfg.turnTimeout);
+          const result = await withBrokerBusyFallback(() => codex.runTurn(threadId, msg.text, cfg.turnTimeout));
           isTurnRunning = false;
           process.stdout.write("\n");
           log(`→ sending result to team-lead (${taskId})`);

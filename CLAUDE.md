@@ -15,7 +15,7 @@ npm run dev          # Run bridge with tsx (development)
 npm run start        # Run compiled bridge (node dist/index.js)
 
 # Run the bridge manually
-npx tsx src/index.ts --team <team> --name <name> [--model <model>] [--cwd <path>]
+npx tsx src/index.ts --team <team> --name <name> [--model <model>] [--cwd <path>] [--broker-endpoint <endpoint>]
 
 # Debug inbox activity
 npx tsx src/watch-inboxes.ts
@@ -33,6 +33,9 @@ The system has three layers:
    - Polls its inbox file (`~/.claude/teams/{team}/inboxes/{name}.json`) every 300ms
    - Spawns `codex app-server` as a child process and communicates over JSON-RPC (stdin/stdout)
    - Manages Codex session lifecycle: `initialize` -> `thread/start` -> `turn/start` per task (with `turn/steer` and `turn/interrupt` for mid-turn control)
+   - Supports two transport modes: direct spawn (`codex app-server` via stdin/stdout) or broker connection (Unix socket via `codex-plugin-cc` broker)
+   - Auto-discovers broker via `CODEX_COMPANION_APP_SERVER_ENDPOINT` env var or `broker.json` in the plugin state directory, falls back to direct spawn
+   - **Note**: When using broker mode, if the broker is unreachable or busy (`-32001`), the bridge automatically falls back to direct spawn. Multiple bridges sharing one broker must take turns for broker-mediated requests.
    - Supports `steer_request` messages to add context to a running turn (resets the 30-min turn timeout) and `interrupt_request` to cancel
    - Writes results back to `~/.claude/teams/{team}/inboxes/team-lead.json`
    - Handles `shutdown_request` messages for graceful teardown
@@ -40,7 +43,10 @@ The system has three layers:
 3. **Codex App Server** - OpenAI's agent runtime, spawned with `approvalPolicy: "never"` and `sandbox: "workspace-write"`
 
 Key classes in `src/index.ts`:
-- `CodexServer` - JSON-RPC client wrapping the `codex app-server` child process
+- `CodexServer` (abstract) - Base JSON-RPC client with shared protocol logic
+- `SpawnedCodexServer` - Direct transport, spawns `codex app-server` as child process (stdin/stdout)
+- `BrokerCodexServer` - Broker transport, connects to existing app-server via Unix socket (codex-plugin-cc broker)
+- `createCodexServer()` - Factory that auto-discovers broker or falls back to direct spawn
 - `InboxManager` - File-based message queue using atomic write (tmp + rename) for concurrency safety
 
 `src/watch-inboxes.ts` is a standalone debug utility that polls `~/.claude/teams/*/inboxes/*.json` for changes and logs them.
