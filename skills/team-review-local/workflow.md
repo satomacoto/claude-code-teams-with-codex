@@ -70,11 +70,10 @@ Each reviewer must return findings in this format:
 
 For **each** Codex reviewer:
 
-1. Start a bridge instance with a unique name:
+1. Start a bridge instance with a unique name. Replace `{cwd}` with the actual working directory path:
    ```bash
-   CODEX_PANE_<N>=$(tmux split-window -h -P -F '#{pane_id}' "npx --prefix <path-to-repo> tsx <path-to-repo>/src/index.ts --team {team-name} --name <reviewer-name> --cwd $(pwd); echo '[Bridge exited]'; read")
+   tmux split-window -h -P -F '#{pane_id}' "npx --prefix <path-to-repo> tsx <path-to-repo>/src/index.ts --team {team-name} --name <reviewer-name> --cwd {cwd}; echo '[Bridge exited]'; read" > /tmp/codex-pane-<reviewer-name> && sleep 5 && cat /tmp/codex-pane-<reviewer-name>
    ```
-2. Wait 5 seconds for initialization.
 3. Send the review task via `SendMessage` with the same context as Claude reviewers.
 4. Collect the response.
 
@@ -131,9 +130,9 @@ Typically 1–2 rounds of iteration suffice. If after **5 rounds** a finding is 
 
 After the review is complete, shut down **all** Codex teammates:
 1. Send `shutdown_request` via `SendMessage` to each Codex reviewer.
-2. After `shutdown_approved`, close each pane:
+2. After `shutdown_approved`, close each pane (pane id is in `/tmp/codex-pane-<reviewer-name>`):
    ```bash
-   tmux kill-pane -t $CODEX_PANE_<N>
+   tmux kill-pane -t $(cat /tmp/codex-pane-<reviewer-name>)
    ```
 
 ## Report

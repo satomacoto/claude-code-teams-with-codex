@@ -32,7 +32,8 @@ The system has three layers:
    - Registers itself in the team config at `~/.claude/teams/{team}/config.json`
    - Polls its inbox file (`~/.claude/teams/{team}/inboxes/{name}.json`) every 300ms
    - Spawns `codex app-server` as a child process and communicates over JSON-RPC (stdin/stdout)
-   - Manages Codex session lifecycle: `initialize` -> `thread/start` -> `turn/start` per task
+   - Manages Codex session lifecycle: `initialize` -> `thread/start` -> `turn/start` per task (with `turn/steer` and `turn/interrupt` for mid-turn control)
+   - Supports `steer_request` messages to add context to a running turn (resets the 30-min turn timeout) and `interrupt_request` to cancel
    - Writes results back to `~/.claude/teams/{team}/inboxes/team-lead.json`
    - Handles `shutdown_request` messages for graceful teardown
    - Auto-restarts Codex App Server on crash

@@ -36,7 +36,7 @@ function parseArgs(): Config {
     team: "default",
     name: "codex",
     cwd: process.cwd(),
-    turnTimeout: 300_000,
+    turnTimeout: 1_800_000,
     maxQueueSize: DEFAULT_MAX_QUEUE_SIZE,
   };
   for (let i = 0; i < args.length; i++) {
@@ -135,21 +135,36 @@ class CodexServer extends EventEmitter {
     return thread["id"] as string;
   }
 
+  private turnTimer: ReturnType<typeof setTimeout> | null = null;
+  private turnTimeoutMs = 0;
+  private turnTimedOut: (() => void) | null = null;
+
+  resetTurnTimeout() {
+    if (this.turnTimer) clearTimeout(this.turnTimer);
+    if (this.turnTimedOut) {
+      this.turnTimer = setTimeout(this.turnTimedOut, this.turnTimeoutMs);
+    }
+  }
+
   runTurn(threadId: string, text: string, timeoutMs: number): Promise<string> {
     return new Promise((resolve, reject) => {
       let buffer = "";
       let settled = false;
 
-      const timer = setTimeout(() => {
+      this.turnTimeoutMs = timeoutMs;
+      this.turnTimedOut = () => {
         if (!settled) {
           settled = true;
           cleanup();
           reject(new Error(`Turn timed out after ${timeoutMs / 1000}s`));
         }
-      }, timeoutMs);
+      };
+      this.turnTimer = setTimeout(this.turnTimedOut, timeoutMs);
 
       const cleanup = () => {
-        clearTimeout(timer);
+        if (this.turnTimer) clearTimeout(this.turnTimer);
+        this.turnTimer = null;
+        this.turnTimedOut = null;
         this.off("notification", onNotification);
       };
 
@@ -205,6 +220,17 @@ class CodexServer extends EventEmitter {
         }
       });
     });
+  }
+
+  steer(threadId: string, text: string) {
+    return this.request("turn/steer", {
+      threadId,
+      input: [{ type: "text", text }],
+    });
+  }
+
+  interrupt(threadId: string) {
+    return this.request("turn/interrupt", { threadId });
   }
 
   kill() { this.proc.kill(); }
@@ -393,6 +419,7 @@ async function main() {
     log("Starting Codex App Server...");
     codex = new CodexServer(cfg.cwd);
     codex.on("exit", (code) => {
+      isTurnRunning = false;
       log(`Codex App Server exited (code=${code}). Restarting in 2s...`);
       setTimeout(async () => {
         try {
@@ -424,6 +451,7 @@ async function main() {
   let nextTaskId = 1;
   let isProcessing = false;
   let currentTaskId: string | null = null;
+  let isTurnRunning = false;
 
   function genTaskId(): string {
     return `task-${nextTaskId++}`;
@@ -456,11 +484,14 @@ async function main() {
         }
 
         try {
+          isTurnRunning = true;
           const result = await codex.runTurn(threadId, msg.text, cfg.turnTimeout);
+          isTurnRunning = false;
           process.stdout.write("\n");
           log(`→ sending result to team-lead (${taskId})`);
           inbox.sendText(cfg.name, result);
         } catch (err: unknown) {
+          isTurnRunning = false;
           const message = err instanceof Error ? err.message : String(err);
           log(`Error (${taskId}): ${message}`);
           inbox.sendText(cfg.name, `Error: ${message}`);
@@ -506,6 +537,35 @@ async function main() {
         unregisterFromTeam(cfg.team, cfg.name);
         codex.kill();
         process.exit(0);
+      }
+
+      // If a turn is currently running, handle control messages (steer/interrupt)
+      if (isTurnRunning && codex.isAlive && parsed?.["type"]) {
+        if (parsed["type"] === "interrupt_request") {
+          log(`⚡ Interrupt requested by ${msg.from} during ${currentTaskId}`);
+          codex.interrupt(threadId).catch((err) => {
+            const message = err instanceof Error ? err.message : String(err);
+            log(`Interrupt error: ${message}`);
+            inbox.sendText(cfg.name, `Error: interrupt failed for ${currentTaskId}: ${message}`);
+          });
+          toAck.push(msg);
+          continue;
+        }
+
+        if (parsed["type"] === "steer_request") {
+          const steerText = (parsed["text"] as string) ?? msg.text;
+          log(`↪ Steering active turn (${currentTaskId}) with message from ${msg.from}`);
+          codex.steer(threadId, steerText).then(() => {
+            codex.resetTurnTimeout();
+            log(`⏱ Turn timeout reset (${cfg.turnTimeout / 1000}s)`);
+          }).catch((err) => {
+            const message = err instanceof Error ? err.message : String(err);
+            log(`Steer error: ${message}`);
+            inbox.sendText(cfg.name, `Error: steer failed for ${currentTaskId}: ${message}`);
+          });
+          toAck.push(msg);
+          continue;
+        }
       }
 
       // Check queue capacity (count active task + queued items)
