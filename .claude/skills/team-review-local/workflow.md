@@ -45,7 +45,7 @@ Assign reviewers based on the **5 core review perspectives** (always included) p
 
 #### Codex mode
 
-**Always use codex-teammate** (tmux bridge via `/codex-teammate` skill steps). Do NOT use `codex exec` unless the user explicitly requests it.
+**Always use spawn-codex** (tmux bridge via `/spawn-codex` skill steps). Do NOT use `codex exec` unless the user explicitly requests it.
 
 ## Phase 2: Review (parallel)
 
@@ -66,7 +66,7 @@ Each reviewer must return findings in this format:
 
 **Only report findings with confidence ≥ 60** (the validation phase will filter further).
 
-### Codex reviewers (via codex-teammate)
+### Codex reviewers (via spawn-codex)
 
 For **each** Codex reviewer:
 

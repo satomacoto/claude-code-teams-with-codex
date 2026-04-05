@@ -1,5 +1,5 @@
 ---
-name: codex-teammate
+name: spawn-codex
 description: Add Codex CLI as a teammate to an agent team. Creates the team if needed. Runs App Server bridge in a tmux pane with inbox communication.
 argument-hint: "[teammate-name]"
 ---
